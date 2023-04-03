@@ -3,6 +3,7 @@ import torch.nn.functional as F
 import torch.nn as nn
 import numpy as np
 
+
 def reparameterize(x, var):
     # 求矩阵x的均值和方差
     mean = x.mean(dim=0, keepdim=False)
@@ -21,10 +22,10 @@ class CrossCameraTripletLoss(torch.nn.Module):
         super(CrossCameraTripletLoss, self).__init__()
         self.margin = margin
 
-    def forward(self, features, labels):
+    def forward(self, features, old_features, labels):
         # features: [batch_size, feature_size]
         # labels: [batch_size,], num_tasks是每个行人的任务数
-        dists = torch.cdist(features, features, p=2)  # 计算特征间的欧几里得距离
+        dists = torch.cdist(features, old_features, p=2)  # 计算特征间的欧几里得距离
         pos_mask = labels.unsqueeze(0) == labels.unsqueeze(1)  # 获取正样本掩码
         neg_mask = ~pos_mask  # 获取负样本掩码
 
@@ -49,7 +50,7 @@ class CrossCameraTripletLoss(torch.nn.Module):
 
             anchors.append(features[anchor])
             pos.append(features[pos_ind])
-            neg.append(features[neg_ind])
+            neg.append(old_features[neg_ind])
 
         if len(anchors) == 0:
             return torch.tensor(0.0, requires_grad=True).to(features.device)
@@ -77,8 +78,8 @@ class EMA:
 
         # 创建一个新的模型，使用拷贝的模型参数
         model.load_state_dict(old)
-        for param in model.parameters():
-            param.requires_grad = False
+        # for param in model.parameters():
+        #     param.requires_grad = False
 
 
 def distillation_loss(outputs, teacher_outputs, temperature=0.999):
@@ -97,7 +98,7 @@ def distillation_loss(outputs, teacher_outputs, temperature=0.999):
     # soft_teacher_outputs = F.softmax(teacher_outputs / temperature, dim=0)
 
     # 计算交叉熵损失
-    loss = nn.KLDivLoss(reduction='batchmean')(outputs/temperature, teacher_outputs/temperature)
+    loss = nn.KLDivLoss(reduction='batchmean')(outputs / temperature, teacher_outputs / temperature)
 
     # 返回损失
     return loss
@@ -122,9 +123,16 @@ def jensen_shannon_divergence(p, q):
 
 def few_shot(model):
     # 对每一层的参数进行处理
+    p = []
+    for name, param in model.named_parameters():
+        if len(param.shape) > 1:
+            p.append(torch.abs(param).max().detach().cpu().numpy())
+    p = np.array(p)
+    threshold = np.percentile(p, 10)
     for name, param in model.named_parameters():
         # 如果是卷积层或线性层的权重参数
-        if param.requires_grad and len(param.shape) > 1:
-            threshold = np.percentile(torch.abs(param.view(-1)).cpu().numpy(), 10)
-            # 将绝对值小于阈值的参数的requires_grad属性设置为True
-            param.requires_grad = torch.tensor(param < threshold, dtype=torch.bool)
+        if len(param.shape) > 1:
+            if torch.max(torch.abs(param)) < threshold:
+                param.requires_grad = True
+            else:
+                param.requires_grad = False

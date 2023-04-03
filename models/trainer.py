@@ -1,12 +1,14 @@
 import torch
 from copy import deepcopy
-from utils.trick_util import center_loss, CrossCameraTripletLoss, distillation_loss, EMA, jensen_shannon_divergence
+from utils.trick_util import center_loss, CrossCameraTripletLoss, few_shot, EMA
 from utils.meters import AverageMeter
 import numpy as np
 from torch.nn import functional as F
 from torch import nn, autograd
+from utils.data.fetch import train_transformer
 from IPython import embed
 import models
+import time
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -18,9 +20,8 @@ class Trainer(nn.Module):
         self.iters = iters
         # 拷贝模型参数
         self.temp = temp
-        self.trpilet = CrossCameraTripletLoss(margin=margin)
-        self.temperature = temperature
         self.momentum = momentum
+        self.old_model = None
 
     def classifier(self, features: torch.Tensor, labels):
         outputs = cm(features, labels, self.centrals, self.momentum)
@@ -32,14 +33,18 @@ class Trainer(nn.Module):
         return ups / down
 
     def start(self, data_loader, epoch, optim, cam_loader=None):
+
         self.model.train()
         losses = AverageMeter()
+        if epoch >= 40:
+            few_shot(self.model)
+        end = time.time()
         for i in range(self.iters):
             # extract
-            data, _, label, old_label, cid, _ = data_loader.next()
+            data, _, label, _, _, _ = data_loader.next()
             data = data.to(device)
             label = label.to(device)
-            # cams = cid.to(device)
+
             new_f = self._forward(data)
             new_f = F.normalize(new_f, dim=1).to(device)
 
@@ -47,39 +52,44 @@ class Trainer(nn.Module):
             new_p = self.classifier(new_f, label)
             contrast_loss = -torch.mean(torch.log(new_p))
 
-            # cam domain
-            cam_data1, cam_data2 = cam_loader.next()
-            cam_data1 = cam_data1.to(device)
-            cam_data2 = cam_data2.to(device)
-            cam_data1 = self._forward(cam_data1)
-            cam_data2 = self._forward(cam_data2)
-            coral_loss = coral(cam_data1, cam_data2)
+            # lifelong
+
+            # self.old_model.eval()
+            # with torch.no_grad():
+            #     data = train_transformer(data)
+            #     old_f = self.old_model(data)
+            #     old_f = F.normalize(old_f, dim=1).to(device)
+            # coral_loss = self.trpilet(new_f, old_f, label)
 
             # sum
-            loss = contrast_loss + coral_loss
+            loss = contrast_loss
 
             # optim
             optim.zero_grad()
             loss.backward()
-            # self.update(new_f, label, cams)
             optim.step()
 
+            # update
+            # self.ema.update(self.old_model.state_dict(), self.model.state_dict(), self.old_model)
+
             # record
+            t_cost = time.time() - end
+
             record = np.array([loss.item(),
-                               contrast_loss.item(),
-                               coral_loss.item()
+                               # contrast_loss.item(),
+                               t_cost
                                ])
             losses.update(record)
             if (i + 1) % 20 == 0:
-                print('Epoch: [{}][{}/{}]\n'
-                      'loss {:.3f} ({:.3f})    | '
-                      'contrast {:.3f} ({:.3f}) '
-                      'coral {:.3f} ({:.3f})'
+                print('Epoch: [{}][{}/{}]\t'
+                      'loss {:.3f} ({:.3f})\t'
+                      'time {:.3f} ({:.3f})'
                       .format(epoch, i + 1, len(data_loader),
                               losses.val[0], losses.avg[0],
                               losses.val[1], losses.avg[1],
-                              losses.val[2], losses.avg[2],
+                              # losses.val[2], losses.avg[2],
                               ))
+            end = time.time()
 
     def _forward(self, inputs):
         return self.model(inputs)
@@ -120,12 +130,20 @@ class CM(autograd.Function):
             grad_inputs = grad_outputs.mm(ctx.features)
 
         # momentum update
-        for x, y in zip(inputs, targets):
-            ctx.features[y] = ctx.momentum * ctx.features[y] + (1. - ctx.momentum) * x
-            ctx.features[y] /= ctx.features[y].norm()
+        uniq_ids = torch.unique(targets)
+        for label in uniq_ids:
+            pos_f = inputs[torch.where(targets == label)]
+            distances = torch.norm(pos_f - ctx.features[label].unsqueeze(0), dim=1)
+            weights = distances / distances.sum()
+            weighted_features = pos_f * weights.view(-1, 1)
+            center = torch.sum(weighted_features, dim=0, keepdim=False)
+            # center = center / center.norm()
+            ctx.features[label] = ctx.features[label] * ctx.momentum + center * (1. - ctx.momentum)
+            ctx.features[label] = ctx.features[label] / ctx.features[label].norm()
 
         return grad_inputs, None, None, None
 
 
 def cm(inputs, indexes, features, momentum=0.5):
     return CM.apply(inputs, indexes, features, torch.Tensor([momentum]).to(inputs.device))
+

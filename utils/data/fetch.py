@@ -16,7 +16,6 @@ def get_data(name, data_dir):
 
 def get_train_loader(dataset, height, width, batch_size, workers,
                      num_instances, iters, trainset=None, old_label=False):
-
     normalizer = T.Normalize(mean=[0.485, 0.456, 0.406],
                              std=[0.229, 0.224, 0.225])
 
@@ -66,3 +65,17 @@ def get_test_loader(dataset, height, width, batch_size, workers, testset=None):
         shuffle=False, pin_memory=True)
 
     return test_loader
+
+
+normalizer = T.Normalize(mean=[0.485, 0.456, 0.406],
+                         std=[0.229, 0.224, 0.225])
+
+train_transformer = T.Compose([
+    # T.Resize((256, 128), interpolation=InterpolationMode.BICUBIC),
+    T.RandomHorizontalFlip(p=0.5),
+    T.Pad(10),
+    T.RandomCrop((256, 128)),
+    # T.ToTensor(),
+    normalizer,
+    T.RandomErasing(probability=0.5, mean=[0.485, 0.456, 0.406])
+])

@@ -38,8 +38,10 @@ def work(args):
     test_loader = get_test_loader(dataset, 256, 128, args.batch_size, 4)
     # Create model
     model = create()
+    # old_model = create()
     # model = low_rank_cov_change(model)
     model = nn.DataParallel(model)
+    # old_model = nn.DataParallel(old_model)
     # Evaluator
     evaluator = Evaluator(model)
 
@@ -48,8 +50,14 @@ def work(args):
     optimizer = torch.optim.Adam(params, lr=0.00035, weight_decay=5e-4)
     lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.1)
     train = Trainer(model, args.iters, args.temp, momentum=args.momentum, temperature=1).to(device)
+    # train.old_model = old_model
+    if args.batch_size == 128:
+        instances = 8
+    else:
+        instances = 16
     for i in range(args.epochs):
         epoch = i + 1
+        # old_model.load_state_dict(model.state_dict())
         with torch.no_grad():
             print('==> Create pseudo labels for unlabeled data')
             cluster_loader = get_test_loader(dataset, 256, 128, args.batch_size, 4, testset=sorted(dataset.train))
@@ -91,7 +99,7 @@ def work(args):
                 pseudo_labeled_dataset.append((fname, label.item(), old_label.item(), cid))
 
         print('==> Statistics for epoch {}: {} clusters'.format(epoch, num_cluster))
-        train_loader = get_train_loader(dataset, 256, 128, args.batch_size, 4, 16, iters,
+        train_loader = get_train_loader(dataset, 256, 128, args.batch_size, 4, instances, iters,
                                         trainset=pseudo_labeled_dataset, old_label=True)
         train_loader.new_epoch()
         train.iters = iters
